@@ -16,9 +16,9 @@
 
 /* Author's email: simon@thekelleys.org.uk */
 
-#define VERSION "1.0"
+#define VERSION "1.1"
 
-#define COPYRIGHT "Copyright (C) 2004-2008 Simon Kelley" 
+#define COPYRIGHT "Copyright (C) 2004-2012 Simon Kelley" 
 
 #include <sys/socket.h>
 #include <sys/ioctl.h>
@@ -391,8 +391,15 @@ int main(int argc, char **argv)
     iface_index = 0;
     for (cmptr = CMSG_FIRSTHDR(&msg); cmptr; cmptr = CMSG_NXTHDR(&msg, cmptr))
       if (cmptr->cmsg_level == SOL_IP && cmptr->cmsg_type == IP_PKTINFO)
-	iface_index = ((struct in_pktinfo *)CMSG_DATA(cmptr))->ipi_ifindex;
-  
+	{
+          union {
+            unsigned char *c;
+            struct in_pktinfo *p;
+          } p;
+          p.c = CMSG_DATA(cmptr);
+          iface_index = p.p->ipi_ifindex;
+	}
+    
     if (!(ifr.ifr_ifindex = iface_index) || ioctl(fd, SIOCGIFNAME, &ifr) == -1)
       continue;
     	 
@@ -509,7 +516,7 @@ int main(int argc, char **argv)
             
 	if (packet->ciaddr.s_addr)
 	  saddr.sin_addr = packet->ciaddr;
-	else if (ntohs(packet->flags) & 0x8000 || packet->hlen > 14)
+	else if (ntohs(packet->flags) & 0x8000 || !packet->yiaddr.s_addr || packet->hlen > 14)
 	  {
 	    /* broadcast to 255.255.255.255 */
 	    msg.msg_controllen = sizeof(control_u);
@@ -532,7 +539,8 @@ int main(int argc, char **argv)
 	    if (ioctl(fd, SIOCGIFNAME, &ifr) != -1)
 	      {
 		struct arpreq req;
-		*((struct sockaddr_in *)&req.arp_pa) = saddr;
+		struct sockaddr *pa = &req.arp_pa;
+		memcpy(pa, &saddr, sizeof(struct sockaddr_in));
 		req.arp_ha.sa_family = packet->htype;
 		memcpy(req.arp_ha.sa_data, packet->chaddr, packet->hlen);
 		strncpy(req.arp_dev, ifr.ifr_name, 16);
