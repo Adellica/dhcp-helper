@@ -1,0 +1,12 @@
+This is a simple, straightforward DHCP relay agent which I wrote as
+alternative to the ISC relay. 
+
+It's Linux only because it uses the Linux packet socket facility.
+
+If you use this software, please let me know; I would like some idea
+if it is generally useful to others.
+
+
+Simon Kelley  <simon@thekelleys.org.uk>
+
+

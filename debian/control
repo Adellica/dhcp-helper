@@ -1,0 +1,21 @@
+Source: dhcp-helper
+Section: net
+Priority: optional
+Maintainer: Simon Kelley <simon@thekelleys.org.uk>
+Standards-Version: 3.6.1
+
+Package: dhcp-helper
+Architecture: any
+Depends: netbase, ${shlibs:Depends}
+Conflicts: dhcp-relay, dhcp3-relay, dhcpd, dhcp3-server, udhcpd
+Description: A DHCP relay agent.
+ Dhcp-helper is a DHCP and BOOTP relay agent. It listens for DHCP 
+ and BOOTP broadcasts on directly connected subnets and relays 
+ them to DHCP or BOOTP servers elsewhere. It also relays replies
+ from the remote servers back to partially configured hosts.
+ Dhcp-helper requires a 2.2 or later Linux kernel. The "packet socket"
+ facility must be available, either compiled into the kernel or as 
+ a module. The "Linux packet filter" is not required, which is the 
+ chief advantage of this software over the ISC DHCP relay daemon.
+
+

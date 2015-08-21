@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+
+update-rc.d dhcp-helper defaults >/dev/null
+
+if [ "$1" = "configure" -o "$1" = "abort-upgrade" ]; then
+
+        if [ -x /usr/sbin/invoke-rc.d ] ; then
+     	    invoke-rc.d dhcp-helper  start || true
+        else
+            /etc/init.d/dhcp-helper start || true
+        fi
+
+fi

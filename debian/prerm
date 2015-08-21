@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+if [ -x /usr/sbin/invoke-rc.d ] ; then
+    invoke-rc.d dhcp-helper  stop || true
+else
+    /etc/init.d/dhcp-helper stop || true
+fi
+
+exit 0
+
+
