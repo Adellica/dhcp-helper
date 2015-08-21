@@ -3,9 +3,10 @@ BINDIR = ${PREFIX}/sbin
 MANDIR = ${PREFIX}/man
  
 CFLAGS?= -O2
+version= $(shell ./get-version)
 
 all: dhcp-helper.c
-	$(CC) $(CFLAGS) $(RPM_OPT_FLAGS) -Wall -W dhcp-helper.c -o dhcp-helper
+	$(CC) $(CFLAGS) $(RPM_OPT_FLAGS) -DVERSION=\"$(version)\" -Wall -W dhcp-helper.c -o dhcp-helper
 
 clean:
 	rm -f *~ *.o core dhcp-helper

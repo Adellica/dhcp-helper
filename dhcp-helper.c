@@ -16,8 +16,6 @@
 
 /* Author's email: simon@thekelleys.org.uk */
 
-#define VERSION "1.1"
-
 #define COPYRIGHT "Copyright (C) 2004-2012 Simon Kelley" 
 
 #include <sys/socket.h>
@@ -97,11 +95,11 @@ int main(int argc, char **argv)
   struct namelist *servers = NULL;
   char *runfile = PIDFILE;
   char *user = USER;
-  int debug = 0, altports = 0;
+  int debug = 0, altports = 0, demonize = 1;
   
   while (1)
     {
-      int option = getopt(argc, argv, "b:e:i:s:u:r:dvp");
+      int option = getopt(argc, argv, "b:e:i:s:u:r:dvpn");
       
       if (option == -1)
 	break;
@@ -186,6 +184,10 @@ int main(int argc, char **argv)
 	  altports = 1;
 	  break;
 
+	case 'n':
+	  demonize = 0;
+	  break;
+
 	case 'v':
 	  fprintf(stderr, "dhcp-helper version %s, %s\n", VERSION, COPYRIGHT);
 	  exit(0);
@@ -202,6 +204,7 @@ int main(int argc, char **argv)
 		  "-r <file>        Write daemon PID to this file (default %s)\n"
 		  "-p               Use alternative ports (1067/1068)\n"
 		  "-d               Debug mode\n"
+		  "-n               Do not demonize\n"
 		  "-v               Give version and copyright info and then exit\n",
 		  USER, PIDFILE);
 	  exit(1);
@@ -299,41 +302,48 @@ int main(int argc, char **argv)
 	      exit(1);
 	    };
 	}	  
-
-      /* The following code "daemonizes" the process. 
-         See Stevens section 12.4 */
-
-      if (fork() != 0 )
-        _exit(0);
       
-      setsid();
+      if (chdir("/") == -1)
+	{
+	  perror("dhcp-helper: cannot change directory");
+	   exit(1);
+	}
       
-      if (fork() != 0)
-        _exit(0);
+      if (demonize) {
+	/* The following code "daemonizes" the process.
+	   See Stevens section 12.4 */
+	
+	if (fork() != 0 )
+	  _exit(0);
+	
+	setsid();
+	
+	if (fork() != 0)
+	  _exit(0);
+      }
       
-      chdir("/");
       umask(022); /* make pidfile 0644 */
       
       /* write pidfile _after_ forking ! */
       if ((pidfile = fopen(runfile, "w")))
-        {
-          fprintf(pidfile, "%d\n", (int) getpid());
-          fclose(pidfile);
+	{
+	  fprintf(pidfile, "%d\n", (int) getpid());
+	  fclose(pidfile);
         }
       
       umask(0);
-
+      
       for (i=0; i<64; i++)        
 	if (i != fd)
 	  close(i);
-
+      
       if (getuid() == 0)
 	{
 	  setgroups(0, &dummy);
 	  
 	  if ((gp = getgrgid(ent_pw->pw_gid)))
-	    setgid(gp->gr_gid);
-	  setuid(ent_pw->pw_uid); 
+	    i = setgid(gp->gr_gid);
+	  i = setuid(ent_pw->pw_uid); 
 	  
 	  data->effective = data->permitted = 1 << CAP_NET_ADMIN;
 	  data->inheritable = 0;
@@ -345,7 +355,6 @@ int main(int argc, char **argv)
   
   while (1) {
     int iface_index;
-    struct in_addr iface_addr;
     struct interface *iface;
     ssize_t sz;
     struct msghdr msg;
@@ -403,12 +412,6 @@ int main(int argc, char **argv)
     if (!(ifr.ifr_ifindex = iface_index) || ioctl(fd, SIOCGIFNAME, &ifr) == -1)
       continue;
     	 
-    ifr.ifr_addr.sa_family = AF_INET;
-    if (ioctl(fd, SIOCGIFADDR, &ifr) == -1)
-      continue;
-    else
-      iface_addr = ((struct sockaddr_in *) &ifr.ifr_addr)->sin_addr;
-    
     /* last ditch loop squashing. */
     if ((packet->hops++) > 20)
       continue;
@@ -458,9 +461,30 @@ int main(int argc, char **argv)
 	else
 	  {
 	    /* plug in our address */
-	    packet->giaddr = iface_addr;
+	    struct in_addr iface_addr;
+	    ifr.ifr_addr.sa_family = AF_INET;
+	    if (ioctl(fd, SIOCGIFADDR, &ifr) == -1)
+	      continue;
+	    
+	    iface_addr = packet->giaddr = ((struct sockaddr_in *) &ifr.ifr_addr)->sin_addr;
+	    /* build address->interface index table for returning answers */
+	    for (iface = ifaces; iface; iface = iface->next)
+	      if (iface->addr.s_addr == iface_addr.s_addr)
+		{
+		  iface->index = iface_index;
+		  break;
+		}
+	    
+	    /* not there, add a new entry */
+	    if (!iface && (iface = malloc(sizeof(struct interface))))
+	      {
+		iface->next = ifaces;
+		ifaces = iface;
+		iface->addr = iface_addr;
+		iface->index = iface_index;
+	      }
 	  }
-
+	
 	/* send to all configured servers. */
 	for (tmp = servers; tmp; tmp = tmp->next)
 	  {
@@ -478,23 +502,6 @@ int main(int argc, char **argv)
 	    saddr.sin_port = htons(altports ? DHCP_SERVER_ALTPORT : DHCP_SERVER_PORT);
 	    while(sendto(fd, packet, sz, 0, (struct sockaddr *)&saddr, sizeof(saddr)) == -1 &&
 		  errno == EINTR);
-	  }
-
-	/* build address->interface index table for returning answers */
-	for (iface = ifaces; iface; iface = iface->next)
-	  if (iface->addr.s_addr == iface_addr.s_addr)
-	    {
-	      iface->index = iface_index;
-	      break;
-	    }
-
-	/* not there, add a new entry */
-	if (!iface && (iface = malloc(sizeof(struct interface))))
-	  {
-	    iface->next = ifaces;
-	    ifaces = iface;
-	    iface->addr = iface_addr;
-	    iface->index = iface_index;
 	  }
       }
     else if (packet->op == BOOTREPLY)

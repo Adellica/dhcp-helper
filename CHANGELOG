@@ -1,3 +1,9 @@
+version 1.2   Add -n flag to inhibit daemonisation. Thanks to 
+	      Andrey Alexandrenko for the patch.
+
+	      Cope with the interface to the server not having an IP
+	      address. Thanks to Dorian for the patch.
+
 version 1.1   Handle reply packets with yiaddr == 0. This fixes 
               problems with WDS. Thanks to James Harper for the
               patch. 
