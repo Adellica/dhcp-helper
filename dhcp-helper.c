@@ -12,7 +12,7 @@
 
 /* Author's email: simon@thekelleys.org.uk */
 
-#define VERSION "0.6"
+#define VERSION "0.7"
 
 #define COPYRIGHT "Copyright (C) 2004-2006 Simon Kelley" 
 
@@ -467,7 +467,7 @@ int main(int argc, char **argv)
             
 	if (packet->ciaddr.s_addr)
 	  saddr.sin_addr = packet->ciaddr;
-	else if (ntohs(packet->flags) & 0x8000)
+	else if (ntohs(packet->flags) & 0x8000 || packet->hlen > 14)
 	  {
 	    /* broadcast to 255.255.255.255 */
 	    msg.msg_controllen = sizeof(control_u);
@@ -487,7 +487,7 @@ int main(int argc, char **argv)
 	       Insert arp entry direct.*/
 	    saddr.sin_addr = packet->yiaddr;
 	    ifr.ifr_ifindex = iface->index;
-	    if (ioctl(fd, SIOCGIFNAME, &ifr) != -1 && packet->hlen <= 14)
+	    if (ioctl(fd, SIOCGIFNAME, &ifr) != -1)
 	      {
 		struct arpreq req;
 		*((struct sockaddr_in *)&req.arp_pa) = saddr;
