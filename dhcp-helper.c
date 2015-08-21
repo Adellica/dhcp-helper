@@ -1,20 +1,24 @@
-/* dhcp-helper is Copyright (c) 2004,2006 Simon Kelley
+/* dhcp-helper is Copyright (c) 2004,2008 Simon Kelley
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
-   the Free Software Foundation; version 2 dated June, 1991.
+   the Free Software Foundation; version 2 dated June, 1991, or
+   (at your option) version 3 dated 29 June, 2007.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
+
+   You should have received a copy of the GNU General Public License
+   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 /* Author's email: simon@thekelleys.org.uk */
 
-#define VERSION "0.7"
+#define VERSION "0.8"
 
-#define COPYRIGHT "Copyright (C) 2004-2006 Simon Kelley" 
+#define COPYRIGHT "Copyright (C) 2004-2008 Simon Kelley" 
 
 #include <sys/socket.h>
 #include <sys/ioctl.h>
@@ -47,6 +51,8 @@ extern int capset(cap_user_header_t header, cap_user_data_t data);
 #define DHCP_CHADDR_MAX  16
 #define DHCP_SERVER_PORT 67
 #define DHCP_CLIENT_PORT 68
+#define DHCP_SERVER_ALTPORT 1067
+#define DHCP_CLIENT_ALTPORT 1068
 #define BOOTREQUEST      1
 #define BOOTREPLY        2
 
@@ -76,7 +82,7 @@ struct dhcp_packet_with_opts{
 
 int main(int argc, char **argv)
 {
-  int fd = -1, opt;
+  int fd = -1, oneopt = 1, mtuopt = IP_PMTUDISC_DONT;
   struct ifreq ifr;
   struct sockaddr_in saddr;
   size_t buf_size = sizeof(struct dhcp_packet_with_opts);
@@ -86,11 +92,11 @@ int main(int argc, char **argv)
   struct namelist *servers = NULL;
   char *runfile = PIDFILE;
   char *user = USER;
-  int debug = 0;
+  int debug = 0, altports = 0;
   
   while (1)
     {
-      int option = getopt(argc, argv, "b:e:i:s:u:r:dv");
+      int option = getopt(argc, argv, "b:e:i:s:u:r:dvp");
       
       if (option == -1)
 	break;
@@ -171,6 +177,10 @@ int main(int argc, char **argv)
 	  debug = 1;
 	  break;
 	  
+	case 'p':
+	  altports = 1;
+	  break;
+
 	case 'v':
 	  fprintf(stderr, "dhcp-helper version %s, %s\n", VERSION, COPYRIGHT);
 	  exit(0);
@@ -185,6 +195,7 @@ int main(int argc, char **argv)
 		  "-e <interface>   Do not listen for DHCP requests on <interface>\n"
 		  "-u <user>        Change to user <user> (defaults to %s)\n"
 		  "-r <file>        Write daemon PID to this file (default %s)\n"
+		  "-p               Use alternative ports (1067/1068)\n"
 		  "-d               Debug mode\n"
 		  "-v               Give version and copyright info and then exit\n",
 		  USER, PIDFILE);
@@ -211,16 +222,16 @@ int main(int argc, char **argv)
       exit(1);
     }
   
-  opt = 1;
-  if (setsockopt(fd, SOL_IP, IP_PKTINFO, &opt, sizeof(opt)) == -1 ||
-      setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt)) == -1)  
+  if (setsockopt(fd, SOL_IP, IP_PKTINFO, &oneopt, sizeof(oneopt)) == -1 ||
+      setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &oneopt, sizeof(oneopt)) == -1 ||
+      setsockopt(fd, SOL_IP, IP_MTU_DISCOVER, &mtuopt, sizeof(mtuopt)) == -1)  
     {
       perror("dhcp-helper: cannot set options on DHCP socket");
       exit(1);
     }
   
   saddr.sin_family = AF_INET;
-  saddr.sin_port = htons(DHCP_SERVER_PORT);
+  saddr.sin_port = htons(altports ? DHCP_SERVER_ALTPORT : DHCP_SERVER_PORT);
   saddr.sin_addr.s_addr = INADDR_ANY;
   if (bind(fd, (struct sockaddr *)&saddr, sizeof(struct sockaddr_in)))
     {
@@ -426,7 +437,7 @@ int main(int argc, char **argv)
 	    else
 	      saddr.sin_addr = tmp->addr;
 	    
-	    saddr.sin_port = htons(DHCP_SERVER_PORT);
+	    saddr.sin_port = htons(altports ? DHCP_SERVER_ALTPORT : DHCP_SERVER_PORT);
 	    while(sendto(fd, packet, sz, 0, (struct sockaddr *)&saddr, sizeof(saddr)) == -1 &&
 		  errno == EINTR);
 	  }
@@ -451,7 +462,7 @@ int main(int argc, char **argv)
     else if (packet->op == BOOTREPLY)
       { 
 	/* packet from server send back to client */	
-	saddr.sin_port = htons(DHCP_CLIENT_PORT);
+	saddr.sin_port = htons(altports ? DHCP_CLIENT_ALTPORT : DHCP_CLIENT_PORT);
 	msg.msg_control = NULL;
 	msg.msg_controllen = 0;
 	msg.msg_namelen = sizeof(saddr);

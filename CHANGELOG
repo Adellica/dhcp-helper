@@ -1,3 +1,7 @@
+version 0.8   Disable path-MTU discovery, which confuses some clients.
+              Add -p option to use alternative ports.
+	      Add GPL-v3 as license option.
+
 version 0.7   Tweak transmit code so that MAC addresses >14 bytes
 	      are handled as broadcasts.
 
