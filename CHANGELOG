@@ -1,3 +1,6 @@
+vesrion 0.5   Fixed buffer-expansion code. My understanding of the
+	      return-code semantics of recvfrom was faulty.
+
 version 0.4   Re-do network access to use the RTnetlink system and
 	      ARP-injection instead of raw packet access. Packet sockets
 	      are no longer required, and things like IPsec should now

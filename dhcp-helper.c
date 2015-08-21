@@ -12,7 +12,7 @@
 
 /* Author's email: simon@thekelleys.org.uk */
 
-#define VERSION "0.4"
+#define VERSION "0.5"
 
 #define COPYRIGHT "Copyright (C) 2004-2006 Simon Kelley" 
 
@@ -326,7 +326,7 @@ int main(int argc, char **argv)
     struct interface *iface;
     ssize_t sz;
     struct msghdr msg;
-    struct iovec iov[1];
+    struct iovec iov;
     struct cmsghdr *cmptr;
     struct in_pktinfo *pkt;
     union {
@@ -336,30 +336,32 @@ int main(int argc, char **argv)
         
     msg.msg_control = control_u.control;
     msg.msg_controllen = sizeof(control_u);
-    msg.msg_flags = 0;
     msg.msg_name = &saddr;
     msg.msg_namelen = 0;
-    msg.msg_iov = iov;
+    msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
-    iov[0].iov_base = packet;
-    iov[0].iov_len = buf_size;
+    iov.iov_base = packet;
+    iov.iov_len = buf_size;
     
-    if ((sz = recvmsg(fd, &msg, MSG_PEEK)) != -1 && sz > (ssize_t)buf_size)
-      {
-	struct dhcp_packet *newbuf = malloc(sz);
-	if (!newbuf)
-	  continue;
-	else
-	  {
-	    free(packet);
-	    iov[0].iov_base = packet = newbuf;
-	    iov[0].iov_len = buf_size = sz;
-	  }
-      }
+    while (1) {
+      struct dhcp_packet *newbuf;
+      size_t newsz;
+
+      msg.msg_flags = 0;
+      while((sz = recvmsg(fd, &msg, MSG_PEEK)) == -1 && errno == EINTR);
+      
+      if (sz == -1 || !(msg.msg_flags & MSG_TRUNC) ||
+	  !(newbuf = realloc(packet, (newsz = buf_size + 100))))
+	break;
+      
+      iov.iov_base = packet = newbuf;
+      iov.iov_len = buf_size = newsz;
+    }
     
-    sz = recvmsg(fd, &msg, 0);
+    while ((sz = recvmsg(fd, &msg, 0)) == -1 && errno == EINTR);
     
-    if (sz < (ssize_t)(sizeof(struct dhcp_packet)) || 
+    if ((msg.msg_flags & MSG_TRUNC) ||
+	sz < (ssize_t)(sizeof(struct dhcp_packet)) || 
 	msg.msg_controllen < sizeof(struct cmsghdr))
       continue;
     
@@ -471,7 +473,7 @@ int main(int argc, char **argv)
 	saddr.sin_port = htons(DHCP_CLIENT_PORT);
 	msg.msg_controllen = 0;
 	msg.msg_namelen = sizeof(saddr);
-	iov[0].iov_len = sz;
+	iov.iov_len = sz;
 			   
 	/* look up interface index in cache */
 	for (iface = ifaces; iface; iface = iface->next)
