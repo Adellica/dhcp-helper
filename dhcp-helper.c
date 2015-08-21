@@ -12,7 +12,7 @@
 
 /* Author's email: simon@thekelleys.org.uk */
 
-#define VERSION "0.5"
+#define VERSION "0.6"
 
 #define COPYRIGHT "Copyright (C) 2004-2006 Simon Kelley" 
 
@@ -34,13 +34,12 @@
 #include <grp.h>
 #include <netdb.h>
 #include <linux/types.h>
-#include <linux/netlink.h>
-#include <linux/rtnetlink.h>
 #include <linux/capability.h>
 /* There doesn't seem to be a universally-available 
    userpace header for this. */
 extern int capset(cap_user_header_t header, cap_user_data_t data);
 #include <sys/prctl.h>
+#include <net/if_arp.h>
 
 #define PIDFILE "/var/run/dhcp-helper.pid"
 #define USER "nobody"
@@ -77,10 +76,9 @@ struct dhcp_packet_with_opts{
 
 int main(int argc, char **argv)
 {
-  int fd = -1, netlinkfd, opt;
+  int fd = -1, opt;
   struct ifreq ifr;
   struct sockaddr_in saddr;
-  struct sockaddr_nl naddr;
   size_t buf_size = sizeof(struct dhcp_packet_with_opts);
   struct dhcp_packet *packet;
   struct namelist *interfaces = NULL, *except = NULL;
@@ -230,22 +228,6 @@ int main(int argc, char **argv)
       exit(1);
     }
 
-  if ((netlinkfd = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE)) == -1)
-    {
-      perror("dhcp-helper: cannot create RTnetlink socket");
-      exit(1);
-    }
-  
-  naddr.nl_family = AF_NETLINK;
-  naddr.nl_pad = 0;
-  naddr.nl_pid = getpid();
-  naddr.nl_groups = 0;
-  if (bind(netlinkfd, (struct sockaddr *)&naddr, sizeof(struct sockaddr_nl)) == -1)
-    {
-      perror("dhcp-helper: cannot bind netlink socket");
-      exit(1);
-    }
-
   if (!debug)
     {
       FILE *pidfile;
@@ -269,12 +251,8 @@ int main(int argc, char **argv)
                   
       /* Tell kernel to not clear capabilities when dropping root */
       if (capset(hdr, data) == -1 || prctl(PR_SET_KEEPCAPS, 1) == -1)
-	{
-	  perror("dhcp-helper: cannot set capabilities");
-	  exit(1);
-	}
-      
-      if (!ent_pw)
+	ent_pw = NULL; /* must keep root if capset broken */
+      else if (!ent_pw)
 	{
 	  fprintf(stderr, "dhcp-helper: cannot find user %s\n", user);
 	  exit(1);
@@ -284,12 +262,12 @@ int main(int argc, char **argv)
          See Stevens section 12.4 */
 
       if (fork() != 0 )
-        exit(0);
+        _exit(0);
       
       setsid();
       
       if (fork() != 0)
-        exit(0);
+        _exit(0);
       
       chdir("/");
       umask(022); /* make pidfile 0644 */
@@ -304,20 +282,23 @@ int main(int argc, char **argv)
       umask(0);
 
       for (i=0; i<64; i++)        
-	if (i != netlinkfd && i != fd)
+	if (i != fd)
 	  close(i);
 
       setgroups(0, &dummy);
 
-      if ((gp = getgrgid(ent_pw->pw_gid)))
-	setgid(gp->gr_gid);
-      setuid(ent_pw->pw_uid); 
+      if (ent_pw)
+	{
+	  if ((gp = getgrgid(ent_pw->pw_gid)))
+	    setgid(gp->gr_gid);
+	  setuid(ent_pw->pw_uid); 
 
-      data->effective = data->permitted = 1 << CAP_NET_ADMIN;
-      data->inheritable = 0;
-      
-      /* lose the setuid and setgid capbilities */
-      capset(hdr, data);
+	  data->effective = data->permitted = 1 << CAP_NET_ADMIN;
+	  data->inheritable = 0;
+	  
+	  /* lose the setuid and setgid capbilities */
+	  capset(hdr, data);
+	}
     }
   
   while (1) {
@@ -471,6 +452,7 @@ int main(int argc, char **argv)
       { 
 	/* packet from server send back to client */	
 	saddr.sin_port = htons(DHCP_CLIENT_PORT);
+	msg.msg_control = NULL;
 	msg.msg_controllen = 0;
 	msg.msg_namelen = sizeof(saddr);
 	iov.iov_len = sz;
@@ -489,6 +471,7 @@ int main(int argc, char **argv)
 	  {
 	    /* broadcast to 255.255.255.255 */
 	    msg.msg_controllen = sizeof(control_u);
+	    msg.msg_control = control_u.control;
 	    cmptr = CMSG_FIRSTHDR(&msg);
 	    saddr.sin_addr.s_addr = INADDR_BROADCAST;
 	    pkt = (struct in_pktinfo *)CMSG_DATA(cmptr);
@@ -498,45 +481,22 @@ int main(int argc, char **argv)
 	    cmptr->cmsg_level = SOL_IP;
 	    cmptr->cmsg_type = IP_PKTINFO;
 	  }
-	else
+	else 
 	  {
 	    /* client not configured and cannot reply to ARP. 
 	       Insert arp entry direct.*/
-	    struct {
-	      struct nlmsghdr nlh;
-	      struct ndmsg m;
-	      struct rtattr addr_attr;
-	      struct in_addr addr;
-	      struct rtattr ll_attr;
-	      char mac[DHCP_CHADDR_MAX];
-	    } req;
-	    
-	    memset(&req, 0, sizeof(req));
-	    memset(&naddr, 0, sizeof(naddr));
-  
-	    naddr.nl_family = AF_NETLINK;
-	    
-	    req.nlh.nlmsg_len = sizeof(req);
-	    req.nlh.nlmsg_type = RTM_NEWNEIGH;
-	    req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_REPLACE | NLM_F_CREATE;
-	    
-	    req.m.ndm_family = AF_INET;
-	    req.m.ndm_ifindex = iface->index;
-	    req.m.ndm_state = NUD_REACHABLE;
-	    
-	    req.addr_attr.rta_type = NDA_DST;
-	    req.addr_attr.rta_len = RTA_LENGTH(sizeof(struct in_addr));
-	    req.addr = packet->yiaddr;
-	    
-	    req.ll_attr.rta_type = NDA_LLADDR;
-	    req.ll_attr.rta_len = RTA_LENGTH(packet->hlen);
-	    memcpy(req.mac, packet->chaddr, packet->hlen);
-
 	    saddr.sin_addr = packet->yiaddr;
-	    while (sendto(netlinkfd, &req, sizeof(req), 0, 
-			  (struct sockaddr *)&naddr, sizeof(naddr)) == -1 &&
-		   errno == EINTR);
-	    
+	    ifr.ifr_ifindex = iface->index;
+	    if (ioctl(fd, SIOCGIFNAME, &ifr) != -1 && packet->hlen <= 14)
+	      {
+		struct arpreq req;
+		*((struct sockaddr_in *)&req.arp_pa) = saddr;
+		req.arp_ha.sa_family = packet->htype;
+		memcpy(req.arp_ha.sa_data, packet->chaddr, packet->hlen);
+		strncpy(req.arp_dev, ifr.ifr_name, 16);
+		req.arp_flags = ATF_COM;
+		ioctl(fd, SIOCSARP, &req);
+	      }
 	  }
 
 	while (sendmsg(fd, &msg, 0) == -1 && errno == EINTR);

@@ -1,4 +1,7 @@
-vesrion 0.5   Fixed buffer-expansion code. My understanding of the
+version 0.6   Replace netlink code with old-fashioned ioctl, since
+	      netlink ARP is buggy in some kernels.
+
+version 0.5   Fixed buffer-expansion code. My understanding of the
 	      return-code semantics of recvfrom was faulty.
 
 version 0.4   Re-do network access to use the RTnetlink system and
