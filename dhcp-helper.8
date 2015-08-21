@@ -59,8 +59,11 @@ started as root, but it will drop root
 priviledges after startup by changing id to another user. Normally this user is "nobody" but that 
 can be over-ridden with this switch.
 .SH NOTES
-Dhcp-helper requires a 2.2 or later Linux kernel. The "packet socket" facility must be available,
-either compiled into the kernel or as a module. The "Linux packet filter" is 
+Dhcp-helper requires a 2.2 or later Linux kernel. The "routing netlink" facility must be available,
+either compiled into the kernel or as a module. In 2.4 and later
+kernels, this facility is always available and does not need to
+specifically enabled. The "Linux packet
+filter" and "packet socket" facilities are 
 .I not
 required, which is the chief advantage of this software over the ISC DHCP relay daemon.
 .SH AUTHOR

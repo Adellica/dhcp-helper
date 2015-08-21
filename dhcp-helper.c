@@ -1,4 +1,4 @@
-/* dhcp-helper is Copyright (c) 2004 Simon Kelley
+/* dhcp-helper is Copyright (c) 2004,2006 Simon Kelley
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -12,9 +12,9 @@
 
 /* Author's email: simon@thekelleys.org.uk */
 
-#define VERSION "0.2"
+#define VERSION "0.4"
 
-#define COPYRIGHT "Copyright (C) 2004 Simon Kelley" 
+#define COPYRIGHT "Copyright (C) 2004-2006 Simon Kelley" 
 
 #include <sys/socket.h>
 #include <sys/ioctl.h>
@@ -32,15 +32,20 @@
 #include <errno.h>
 #include <pwd.h>
 #include <grp.h>
-#include <net/ethernet.h>
-#include <netpacket/packet.h>
-#include <netinet/ip.h>
 #include <netdb.h>
-#include <linux/sockios.h>
+#include <linux/types.h>
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
+#include <linux/capability.h>
+/* There doesn't seem to be a universally-available 
+   userpace header for this. */
+extern int capset(cap_user_header_t header, cap_user_data_t data);
+#include <sys/prctl.h>
 
 #define PIDFILE "/var/run/dhcp-helper.pid"
 #define USER "nobody"
 
+#define DHCP_CHADDR_MAX  16
 #define DHCP_SERVER_PORT 67
 #define DHCP_CLIENT_PORT 68
 #define BOOTREQUEST      1
@@ -58,36 +63,26 @@ struct interface {
   struct interface *next;
 };
 
-typedef unsigned char u8;
-typedef unsigned short u16;
-typedef unsigned int u32;
-
-struct udp_dhcp_packet {
-  struct ip ip;
-  struct udphdr {
-    u16 uh_sport;               /* source port */
-    u16 uh_dport;               /* destination port */
-    u16 uh_ulen;                /* udp length */
-    u16 uh_sum;                 /* udp checksum */
-  } udp;
+struct dhcp_packet_with_opts{
   struct dhcp_packet {
-    u8 op, htype, hlen, hops;
-    u32 xid;
-    u16 secs, flags;
+    unsigned char op, htype, hlen, hops;
+    unsigned int xid;
+    unsigned short secs, flags;
     struct in_addr ciaddr, yiaddr, siaddr, giaddr;
-    u8 chaddr[16], sname[64], file[128];
-    u8 options[312];
-  } data;
+    unsigned char chaddr[DHCP_CHADDR_MAX], sname[64], file[128];
+  } header;
+  unsigned char options[312];
 };
 
 
 int main(int argc, char **argv)
 {
-  int fd = -1, rawfd, opt, flags;
+  int fd = -1, netlinkfd, opt;
   struct ifreq ifr;
   struct sockaddr_in saddr;
-  unsigned int buf_size = sizeof(struct udp_dhcp_packet);
-  struct udp_dhcp_packet *rawpacket;
+  struct sockaddr_nl naddr;
+  size_t buf_size = sizeof(struct dhcp_packet_with_opts);
+  struct dhcp_packet *packet;
   struct namelist *interfaces = NULL, *except = NULL;
   struct interface *ifaces = NULL;
   struct namelist *servers = NULL;
@@ -206,7 +201,7 @@ int main(int argc, char **argv)
       exit(1); 
     }
 
-  if (!(rawpacket = malloc(buf_size)))
+  if (!(packet = malloc(buf_size)))
     {
       perror("dhcp-helper: cannot allocate buffer");
       exit(1);
@@ -219,9 +214,7 @@ int main(int argc, char **argv)
     }
   
   opt = 1;
-  if ((flags = fcntl(fd, F_GETFL, 0)) == -1 ||
-      fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1 ||
-      setsockopt(fd, SOL_IP, IP_PKTINFO, &opt, sizeof(opt)) == -1 ||
+  if (setsockopt(fd, SOL_IP, IP_PKTINFO, &opt, sizeof(opt)) == -1 ||
       setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt)) == -1)  
     {
       perror("dhcp-helper: cannot set options on DHCP socket");
@@ -237,15 +230,19 @@ int main(int argc, char **argv)
       exit(1);
     }
 
-  if ((rawfd = socket(PF_PACKET, SOCK_DGRAM, htons(ETHERTYPE_IP))) == -1)
+  if ((netlinkfd = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE)) == -1)
     {
-      perror("dhcp-helper: cannot create DHCP packet socket");
+      perror("dhcp-helper: cannot create RTnetlink socket");
       exit(1);
     }
-
-  if (setsockopt(rawfd, SOL_SOCKET, SO_RCVBUF, &opt, sizeof(opt)) == -1)
+  
+  naddr.nl_family = AF_NETLINK;
+  naddr.nl_pad = 0;
+  naddr.nl_pid = getpid();
+  naddr.nl_groups = 0;
+  if (bind(netlinkfd, (struct sockaddr *)&naddr, sizeof(struct sockaddr_nl)) == -1)
     {
-      perror("dhcp-helper: cannot set options on DHCP packet socket");
+      perror("dhcp-helper: cannot bind netlink socket");
       exit(1);
     }
 
@@ -256,6 +253,26 @@ int main(int argc, char **argv)
       int i;
       gid_t dummy;
       struct group *gp;
+      cap_user_header_t hdr = malloc(sizeof(*hdr));
+      cap_user_data_t data = malloc(sizeof(*data)); 
+
+      if (!hdr || !data)
+	{
+	  perror("dhcp-helper: cannot allocate memory");
+	  exit(1);
+	}
+
+      hdr->version = _LINUX_CAPABILITY_VERSION;
+      hdr->pid = 0; /* this process */
+      data->effective = data->permitted = data->inheritable =
+	(1 << CAP_NET_ADMIN) | (1 << CAP_SETGID) | (1 << CAP_SETUID);
+                  
+      /* Tell kernel to not clear capabilities when dropping root */
+      if (capset(hdr, data) == -1 || prctl(PR_SET_KEEPCAPS, 1) == -1)
+	{
+	  perror("dhcp-helper: cannot set capabilities");
+	  exit(1);
+	}
       
       if (!ent_pw)
 	{
@@ -287,64 +304,62 @@ int main(int argc, char **argv)
       umask(0);
 
       for (i=0; i<64; i++)        
-	if (i != rawfd && i != fd)
+	if (i != netlinkfd && i != fd)
 	  close(i);
 
       setgroups(0, &dummy);
 
       if ((gp = getgrgid(ent_pw->pw_gid)))
 	setgid(gp->gr_gid);
-      setuid(ent_pw->pw_uid);
+      setuid(ent_pw->pw_uid); 
+
+      data->effective = data->permitted = 1 << CAP_NET_ADMIN;
+      data->inheritable = 0;
+      
+      /* lose the setuid and setgid capbilities */
+      capset(hdr, data);
     }
   
   while (1) {
-    fd_set rset;
     int iface_index;
     struct in_addr iface_addr;
-    unsigned int sz, size;    
-    struct dhcp_packet *header;
+    struct interface *iface;
+    ssize_t sz;
     struct msghdr msg;
     struct iovec iov[1];
     struct cmsghdr *cmptr;
+    struct in_pktinfo *pkt;
     union {
       struct cmsghdr align; /* this ensures alignment */
       char control[CMSG_SPACE(sizeof(struct in_pktinfo))];
     } control_u;
+        
+    msg.msg_control = control_u.control;
+    msg.msg_controllen = sizeof(control_u);
+    msg.msg_flags = 0;
+    msg.msg_name = &saddr;
+    msg.msg_namelen = 0;
+    msg.msg_iov = iov;
+    msg.msg_iovlen = 1;
+    iov[0].iov_base = packet;
+    iov[0].iov_len = buf_size;
     
-    FD_ZERO(&rset);
-    FD_SET(fd, &rset);
-
-    if (select(fd+1, &rset, NULL, NULL, NULL) == -1)
-      continue;
-
-    /* read size of waiting packet and expand buffer if necessary */
-    if (ioctl(fd, SIOCINQ, &size) != -1 &&
-	(size + sizeof(struct ip) + sizeof(struct udphdr)) > buf_size)
+    if ((sz = recvmsg(fd, &msg, MSG_PEEK)) != -1 && sz > (ssize_t)buf_size)
       {
-	struct udp_dhcp_packet *newbuf = malloc(size + sizeof(struct ip) + sizeof(struct udphdr));
+	struct dhcp_packet *newbuf = malloc(sz);
 	if (!newbuf)
 	  continue;
 	else
 	  {
-	    buf_size = size + sizeof(struct ip) + sizeof(struct udphdr);
-	    free(rawpacket);
-	    rawpacket = newbuf;
+	    free(packet);
+	    iov[0].iov_base = packet = newbuf;
+	    iov[0].iov_len = buf_size = sz;
 	  }
       }
     
-    msg.msg_control = control_u.control;
-    msg.msg_controllen = sizeof(control_u);
-    msg.msg_flags = 0;
-    msg.msg_name = NULL;
-    msg.msg_namelen = 0;
-    msg.msg_iov = iov;
-    msg.msg_iovlen = 1;
-    iov[0].iov_base = (char *)&rawpacket->data;
-    iov[0].iov_len = buf_size - (sizeof(struct ip) + sizeof(struct udphdr));
-    
     sz = recvmsg(fd, &msg, 0);
-
-    if (sz < (sizeof(*header) - sizeof(header->options)) || 
+    
+    if (sz < (ssize_t)(sizeof(struct dhcp_packet)) || 
 	msg.msg_controllen < sizeof(struct cmsghdr))
       continue;
     
@@ -355,25 +370,25 @@ int main(int argc, char **argv)
   
     if (!(ifr.ifr_ifindex = iface_index) || ioctl(fd, SIOCGIFNAME, &ifr) == -1)
       continue;
-    	
+    	 
     ifr.ifr_addr.sa_family = AF_INET;
     if (ioctl(fd, SIOCGIFADDR, &ifr) == -1)
       continue;
     else
       iface_addr = ((struct sockaddr_in *) &ifr.ifr_addr)->sin_addr;
     
-    header = (struct dhcp_packet *)&rawpacket->data;
-    
     /* last ditch loop squashing. */
-    if ((header->hops++) > 20)
+    if ((packet->hops++) > 20)
       continue;
 
-    if (header->op == BOOTREQUEST)
+    if (packet->hlen > DHCP_CHADDR_MAX)
+      continue;
+
+    if (packet->op == BOOTREQUEST)
       {
 	/* message from client */
 	struct namelist *tmp;
-	struct interface *iface;
-
+	
 	/* packets from networks we are broadcasting _too_
 	   are explicitly not allowed to be forwarded _from_ */
 	for (tmp = servers; tmp; tmp = tmp->next)
@@ -399,11 +414,11 @@ int main(int argc, char **argv)
 	  }
 	
 	/* already gatewayed ? */
-	if (header->giaddr.s_addr)
+	if (packet->giaddr.s_addr)
 	  {
 	    /* if so check if by us, to stomp on loops. */
 	    for (iface = ifaces; iface; iface = iface->next)
-	      if (iface->addr.s_addr == header->giaddr.s_addr)
+	      if (iface->addr.s_addr == packet->giaddr.s_addr)
 		break;
 	    if (iface)
 	      continue;
@@ -411,7 +426,7 @@ int main(int argc, char **argv)
 	else
 	  {
 	    /* plug in our address */
-	    header->giaddr = iface_addr;
+	    packet->giaddr = iface_addr;
 	  }
 
 	/* send to all configured servers. */
@@ -429,7 +444,8 @@ int main(int argc, char **argv)
 	      saddr.sin_addr = tmp->addr;
 	    
 	    saddr.sin_port = htons(DHCP_SERVER_PORT);
-	    sendto(fd, &rawpacket->data, sz, 0, (struct sockaddr *)&saddr, sizeof(saddr));
+	    while(sendto(fd, packet, sz, 0, (struct sockaddr *)&saddr, sizeof(saddr)) == -1 &&
+		  errno == EINTR);
 	  }
 
 	/* build address->interface index table for returning answers */
@@ -449,89 +465,81 @@ int main(int argc, char **argv)
 	    iface->index = iface_index;
 	  }
       }
-    else if (header->op == BOOTREPLY)
+    else if (packet->op == BOOTREPLY)
       { 
-	/* packet from server send back to client */
-	if (header->ciaddr.s_addr)
+	/* packet from server send back to client */	
+	saddr.sin_port = htons(DHCP_CLIENT_PORT);
+	msg.msg_controllen = 0;
+	msg.msg_namelen = sizeof(saddr);
+	iov[0].iov_len = sz;
+			   
+	/* look up interface index in cache */
+	for (iface = ifaces; iface; iface = iface->next)
+	  if (iface->addr.s_addr == packet->giaddr.s_addr)
+	    break;
+	
+	if (!iface)
+	  continue;
+            
+	if (packet->ciaddr.s_addr)
+	  saddr.sin_addr = packet->ciaddr;
+	else if (ntohs(packet->flags) & 0x8000)
 	  {
-	    /* client has configured address, this is easy (might never happen) */
-	    saddr.sin_addr = header->ciaddr;
-	    saddr.sin_port = htons(DHCP_CLIENT_PORT);
-	    sendto(fd, &rawpacket->data, sz, 0, (struct sockaddr *)&saddr, sizeof(saddr));
+	    /* broadcast to 255.255.255.255 */
+	    msg.msg_controllen = sizeof(control_u);
+	    cmptr = CMSG_FIRSTHDR(&msg);
+	    saddr.sin_addr.s_addr = INADDR_BROADCAST;
+	    pkt = (struct in_pktinfo *)CMSG_DATA(cmptr);
+	    pkt->ipi_ifindex = iface->index;
+	    pkt->ipi_spec_dst.s_addr = 0;
+	    msg.msg_controllen = cmptr->cmsg_len = CMSG_LEN(sizeof(struct in_pktinfo));
+	    cmptr->cmsg_level = SOL_IP;
+	    cmptr->cmsg_type = IP_PKTINFO;
 	  }
 	else
 	  {
-	    /* client not configured and cannot reply to ARP. Have to send
-	       directly to its MAC address or broadcast. */
+	    /* client not configured and cannot reply to ARP. 
+	       Insert arp entry direct.*/
+	    struct {
+	      struct nlmsghdr nlh;
+	      struct ndmsg m;
+	      struct rtattr addr_attr;
+	      struct in_addr addr;
+	      struct rtattr ll_attr;
+	      char mac[DHCP_CHADDR_MAX];
+	    } req;
+	    
+	    memset(&req, 0, sizeof(req));
+	    memset(&naddr, 0, sizeof(naddr));
+  
+	    naddr.nl_family = AF_NETLINK;
+	    
+	    req.nlh.nlmsg_len = sizeof(req);
+	    req.nlh.nlmsg_type = RTM_NEWNEIGH;
+	    req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_REPLACE | NLM_F_CREATE;
+	    
+	    req.m.ndm_family = AF_INET;
+	    req.m.ndm_ifindex = iface->index;
+	    req.m.ndm_state = NUD_REACHABLE;
+	    
+	    req.addr_attr.rta_type = NDA_DST;
+	    req.addr_attr.rta_len = RTA_LENGTH(sizeof(struct in_addr));
+	    req.addr = packet->yiaddr;
+	    
+	    req.ll_attr.rta_type = NDA_LLADDR;
+	    req.ll_attr.rta_len = RTA_LENGTH(packet->hlen);
+	    memcpy(req.mac, packet->chaddr, packet->hlen);
 
-	    struct sockaddr_ll dest;
-	    struct interface *iface;
-	    u32 i, sum;
+	    saddr.sin_addr = packet->yiaddr;
+	    while (sendto(netlinkfd, &req, sizeof(req), 0, 
+			  (struct sockaddr *)&naddr, sizeof(naddr)) == -1 &&
+		   errno == EINTR);
 	    
-	    /* look up interface index in cache */
-	    for (iface = ifaces; iface; iface = iface->next)
-	      if (iface->addr.s_addr == header->giaddr.s_addr)
-		break;
-			    
-	    if ((header->hlen > 8) || !iface)
-	      continue;
-	    
-	    dest.sll_ifindex =  iface->index;
-	    dest.sll_family = AF_PACKET;
-	    dest.sll_halen =  header->hlen;
-	    dest.sll_protocol = htons(ETHERTYPE_IP);
-	     
-	    if (ntohs(header->flags) & 0x8000)
-	      {
-		memset(dest.sll_addr, 255,  header->hlen);
-		rawpacket->ip.ip_dst.s_addr = INADDR_BROADCAST;
-	      }
-	    else
-	      {
-		memcpy(dest.sll_addr, header->chaddr, header->hlen); 
-		rawpacket->ip.ip_dst.s_addr = header->yiaddr.s_addr;
-	      }
-	    
-	    rawpacket->ip.ip_p = IPPROTO_UDP;
-	    rawpacket->ip.ip_src.s_addr = iface_addr.s_addr;
-	    rawpacket->ip.ip_len = htons(sizeof(struct ip) + 
-					 sizeof(struct udphdr) +
-					 sz) ;
-	    rawpacket->ip.ip_hl = sizeof(struct ip) / 4;
-	    rawpacket->ip.ip_v = IPVERSION;
-	    rawpacket->ip.ip_tos = 0;
-	    rawpacket->ip.ip_id = htons(0);
-	    rawpacket->ip.ip_off = htons(0x4000); /* don't fragment */
-	    rawpacket->ip.ip_ttl = IPDEFTTL;
-	    rawpacket->ip.ip_sum = 0;
-	    
-	    for (sum = 0, i = 0; i < sizeof(struct ip) / 2; i++)
-	      sum += ((u16 *)&rawpacket->ip)[i];
-	    while (sum>>16)
-	      sum = (sum & 0xffff) + (sum >> 16);  
-	    rawpacket->ip.ip_sum = (sum == 0xffff) ? sum : ~sum;
-	    
-	    rawpacket->udp.uh_sport = htons(DHCP_SERVER_PORT);
-	    rawpacket->udp.uh_dport = htons(DHCP_CLIENT_PORT);
-	    ((u8 *)&rawpacket->data)[sz] = 0; /* for checksum, in case length is odd. */
-	    
-	    rawpacket->udp.uh_sum = 0;
-	    rawpacket->udp.uh_ulen = sum = htons(sizeof(struct udphdr) + sz);
-	    sum += htons(IPPROTO_UDP);
-	    for (i = 0; i < 4; i++)
-	      sum += ((u16 *)&rawpacket->ip.ip_src)[i];
-	    for (i = 0; i < (sizeof(struct udphdr) + sz + 1) / 2; i++)
-	      sum += ((u16 *)&rawpacket->udp)[i];
-
-	    while (sum>>16)
-	      sum = (sum & 0xffff) + (sum >> 16);
-	    rawpacket->udp.uh_sum = (sum == 0xffff) ? sum : ~sum;
-
-	    sendto(rawfd, rawpacket, ntohs(rawpacket->ip.ip_len), 
-		   0, (struct sockaddr *)&dest, sizeof(dest));
 	  }
+
+	while (sendmsg(fd, &msg, 0) == -1 && errno == EINTR);
       }
   }
-
 }
+    
 	    
