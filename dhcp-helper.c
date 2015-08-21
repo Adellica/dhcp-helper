@@ -16,7 +16,7 @@
 
 /* Author's email: simon@thekelleys.org.uk */
 
-#define VERSION "0.8"
+#define VERSION "1.0"
 
 #define COPYRIGHT "Copyright (C) 2004-2008 Simon Kelley" 
 
@@ -42,6 +42,11 @@
 /* There doesn't seem to be a universally-available 
    userpace header for this. */
 extern int capset(cap_user_header_t header, cap_user_data_t data);
+extern int capget(cap_user_header_t header, cap_user_data_t data);
+#define LINUX_CAPABILITY_VERSION_1  0x19980330
+#define LINUX_CAPABILITY_VERSION_2  0x20071026
+#define LINUX_CAPABILITY_VERSION_3  0x20080522
+
 #include <sys/prctl.h>
 #include <net/if_arp.h>
 
@@ -242,33 +247,59 @@ int main(int argc, char **argv)
   if (!debug)
     {
       FILE *pidfile;
-      struct passwd *ent_pw = getpwnam(user);
       int i;
+      struct passwd *ent_pw = getpwnam(user);
       gid_t dummy;
       struct group *gp;
       cap_user_header_t hdr = malloc(sizeof(*hdr));
-      cap_user_data_t data = malloc(sizeof(*data)); 
-
-      if (!hdr || !data)
-	{
-	  perror("dhcp-helper: cannot allocate memory");
-	  exit(1);
-	}
-
-      hdr->version = _LINUX_CAPABILITY_VERSION;
-      hdr->pid = 0; /* this process */
-      data->effective = data->permitted = data->inheritable =
-	(1 << CAP_NET_ADMIN) | (1 << CAP_SETGID) | (1 << CAP_SETUID);
-                  
-      /* Tell kernel to not clear capabilities when dropping root */
-      if (capset(hdr, data) == -1 || prctl(PR_SET_KEEPCAPS, 1) == -1)
-	ent_pw = NULL; /* must keep root if capset broken */
-      else if (!ent_pw)
-	{
-	  fprintf(stderr, "dhcp-helper: cannot find user %s\n", user);
-	  exit(1);
-	};
+      cap_user_data_t data = NULL;
       
+      if (getuid() == 0)
+	{
+	  if (hdr)
+	    {
+	      int capsize = 1;
+	      
+	      /* find version supported by kernel */
+	      memset(hdr, 0, sizeof(*hdr));
+	      capget(hdr, NULL);
+	      
+	      if (hdr->version != LINUX_CAPABILITY_VERSION_1)
+		{
+		  /* if unknown version, use largest supported version (3) */
+		  if (hdr->version != LINUX_CAPABILITY_VERSION_2)
+		    hdr->version = LINUX_CAPABILITY_VERSION_3;
+		  capsize = 2;
+		}
+	      
+	      if ((data = malloc(sizeof(*data) * capsize)))
+		memset(data, 0, sizeof(*data) * capsize);
+	    }
+	  
+	  if (!hdr || !data)
+	    {
+	      perror("dhcp-helper: cannot allocate memory");
+	      exit(1);
+	    }
+	  
+	  hdr->pid = 0; /* this process */
+	  data->effective = data->permitted = data->inheritable =
+	    (1 << CAP_NET_ADMIN) | (1 << CAP_SETGID) | (1 << CAP_SETUID);
+	  
+	  /* Tell kernel to not clear capabilities when dropping root */
+	  if (capset(hdr, data) == -1 || prctl(PR_SET_KEEPCAPS, 1) == -1)
+	    {
+	      perror("dhcp-helper: cannot set kernel capabilities");
+	      exit(1);
+	    }
+	  
+	  if (!ent_pw)
+	    {
+	      fprintf(stderr, "dhcp-helper: cannot find user %s\n", user);
+	      exit(1);
+	    };
+	}	  
+
       /* The following code "daemonizes" the process. 
          See Stevens section 12.4 */
 
@@ -296,19 +327,19 @@ int main(int argc, char **argv)
 	if (i != fd)
 	  close(i);
 
-      setgroups(0, &dummy);
-
-      if (ent_pw)
+      if (getuid() == 0)
 	{
+	  setgroups(0, &dummy);
+	  
 	  if ((gp = getgrgid(ent_pw->pw_gid)))
 	    setgid(gp->gr_gid);
 	  setuid(ent_pw->pw_uid); 
-
+	  
 	  data->effective = data->permitted = 1 << CAP_NET_ADMIN;
 	  data->inheritable = 0;
 	  
 	  /* lose the setuid and setgid capbilities */
-	  capset(hdr, data);
+	  capset(hdr, data);	
 	}
     }
   
