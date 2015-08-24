@@ -47,6 +47,7 @@ extern int capget(cap_user_header_t header, cap_user_data_t data);
 
 #include <sys/prctl.h>
 #include <net/if_arp.h>
+#include <arpa/inet.h>
 
 #define PIDFILE "/var/run/dhcp-helper.pid"
 #define USER "nobody"
